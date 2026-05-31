@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Liberra Manage Access
+  Create and manage resources. Delete/terminate excluded by explicit Deny.
+  Generated: 2026-05-31 16:48:57 UTC
+
+  IMPORTANT: This template is personalized for your Liberra account.
+  The External ID and Liberra Account ID are pre-configured.
+  Simply deploy this stack - no manual parameter entry required.
+
+# No parameters needed - values are pre-filled for security
+# External ID: YOUR_UNIQU... (truncated for security)
+# Liberra Account: YOUR_LIBERRA_ACCOUNT_ID
+
+Resources:
+  LiberraAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: liberra-standard-_LIBERRA
+      Description: |
+        Liberra Manage Access
+        Managed by Liberra - Do not modify manually.
+        External ID is required for role assumption.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: 'arn:aws:iam::YOUR_LIBERRA_ACCOUNT_ID:root'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': 'YOUR_UNIQUE_EXTERNAL_ID_GENERATED_BY_LIBERRA'
+      Policies:
+        - PolicyName: LiberraStandardPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              # --- ALLOW: Full access to all AWS services ---
+              # Safety enforced at application layer (guardrails, confirmation flow)
+
+              - Effect: Allow
+                Action:
+                  - '*'
+                Resource: '*'
+
+              # --- DENY: Only unrecoverable / privilege-escalation actions ---
+              # These are dangerous even with confirmation — block at IAM level
+
+              - Effect: Deny
+                Action:
+                  # IAM identity — privilege escalation risk
+                  - 'iam:CreateUser'
+                  - 'iam:DeleteUser'
+                  - 'iam:CreateLoginProfile'
+                  - 'iam:CreateAccessKey'
+                  - 'iam:DeleteRole'
+                  - 'iam:DetachRolePolicy'
+
+                  # KMS — permanent, unrecoverable
+                  - 'kms:ScheduleKeyDeletion'
+                  - 'kms:DeleteAlias'
+                  - 'kms:DeleteImportedKeyMaterial'
+
+                  # Secrets — permanent data loss
+                  - 'secretsmanager:DeleteSecret'
+
+                  # Audit trails — never allow disabling, even with confirmation
+                  - 'cloudtrail:StopLogging'
+                  - 'cloudtrail:DeleteTrail'
+                  - 'config:StopConfigurationRecorder'
+                  - 'config:DeleteConfigurationRecorder'
+
+                  # Security posture — irreversible regressions
+                  - 'ec2:DisableEbsEncryptionByDefault'
+                  - 'guardduty:DisassociateFromMasterAccount'
+                Resource: '*'
+      Tags:
+        - Key: ManagedBy
+          Value: Liberra
+        - Key: Purpose
+          Value: SecureAWSAccess
+        - Key: PermissionLevel
+          Value: standard
+        - Key: ExternalIdSuffix
+          Value: _LIBERRA
+        - Key: GeneratedAt
+          Value: '2026-05-31 16:48:57 UTC'
+
+Outputs:
+  RoleArn:
+    Description: |
+      Copy this ARN and paste it into Liberra to complete the connection.
+      This is the only value you need to copy.
+    Value: !GetAtt LiberraAccessRole.Arn
+    Export:
+      Name: LiberraRoleArn-_LIBERRA
+
+  RoleName:
+    Description: The name of the created IAM role
+    Value: !Ref LiberraAccessRole
+
+  PermissionLevel:
+    Description: The permission level of this role
+    Value: standard
+
+  SetupInstructions:
+    Description: Next steps after deployment
+    Value: |
+      1. Copy the RoleArn output value above
+      2. Return to Liberra and paste it in the Role ARN field
+      3. Click "Complete Connection" to finish setup
+

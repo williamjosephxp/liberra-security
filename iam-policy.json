@@ -1,0 +1,34 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowAll",
+      "Effect": "Allow",
+      "Action": "*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDangerous",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:CreateLoginProfile",
+        "iam:CreateAccessKey",
+        "iam:DeleteRole",
+        "iam:DetachRolePolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:DeleteAlias",
+        "kms:DeleteImportedKeyMaterial",
+        "secretsmanager:DeleteSecret",
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail",
+        "config:StopConfigurationRecorder",
+        "config:DeleteConfigurationRecorder",
+        "ec2:DisableEbsEncryptionByDefault",
+        "guardduty:DisassociateFromMasterAccount"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
