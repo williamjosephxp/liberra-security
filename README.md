@@ -72,13 +72,9 @@ Specific dangerous parameter combinations are also blocked regardless of operati
 
 ## Verify it yourself
 
-The live policy is always available at:
+The policy is in this repo: [`iam-policy.json`](./iam-policy.json)
 
-```
-GET https://app.liberra.ai/api/settings/iam-policy
-```
-
-This returns the exact JSON embedded in every user's CloudFormation template, generated from the same source that builds it.
+That file is generated from the same source code that builds every user's CloudFormation template. What you see there is exactly what gets deployed to your AWS account.
 
 ---
 
