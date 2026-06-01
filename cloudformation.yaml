@@ -1,7 +1,8 @@
-AWSTemplateFormatVersion: '2010-09-09'
+ï»¿AWSTemplateFormatVersion: '2010-09-09'
 Description: |
-  Liberra Manage Access
-  Create and manage resources. Delete/terminate excluded by explicit Deny.
+  Liberra Access Role
+  Grants Liberra cross-account access to your AWS account.
+  Dangerous operations are blocked at the IAM level and application layer.
   Generated: 2026-05-31 16:48:57 UTC
 
   IMPORTANT: This template is personalized for your Liberra account.
@@ -47,11 +48,11 @@ Resources:
                 Resource: '*'
 
               # --- DENY: Only unrecoverable / privilege-escalation actions ---
-              # These are dangerous even with confirmation — block at IAM level
+              # These are dangerous even with confirmation -- block at IAM level
 
               - Effect: Deny
                 Action:
-                  # IAM identity — privilege escalation risk
+                  # IAM identity -- privilege escalation risk
                   - 'iam:CreateUser'
                   - 'iam:DeleteUser'
                   - 'iam:CreateLoginProfile'
@@ -59,21 +60,21 @@ Resources:
                   - 'iam:DeleteRole'
                   - 'iam:DetachRolePolicy'
 
-                  # KMS — permanent, unrecoverable
+                  # KMS -- permanent, unrecoverable
                   - 'kms:ScheduleKeyDeletion'
                   - 'kms:DeleteAlias'
                   - 'kms:DeleteImportedKeyMaterial'
 
-                  # Secrets — permanent data loss
+                  # Secrets -- permanent data loss
                   - 'secretsmanager:DeleteSecret'
 
-                  # Audit trails — never allow disabling, even with confirmation
+                  # Audit trails -- never allow disabling, even with confirmation
                   - 'cloudtrail:StopLogging'
                   - 'cloudtrail:DeleteTrail'
                   - 'config:StopConfigurationRecorder'
                   - 'config:DeleteConfigurationRecorder'
 
-                  # Security posture — irreversible regressions
+                  # Security posture -- irreversible regressions
                   - 'ec2:DisableEbsEncryptionByDefault'
                   - 'guardduty:DisassociateFromMasterAccount'
                 Resource: '*'
