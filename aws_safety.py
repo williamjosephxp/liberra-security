@@ -7,7 +7,7 @@
 # Repository: https://github.com/williamjosephxp/liberra-security
 
 """
-AWS Safety Layer — Generic Executor Guardrails
+AWS Safety Layer â€” Generic Executor Guardrails
 
 Provides safety classification, blocked operation enforcement, dangerous pattern
 detection, service scoping, and method validation
@@ -16,11 +16,11 @@ for the generic AWS executor (aws_read + aws_execute).
 This is the safety net. Nothing executes without passing through here.
 
 Components:
-1. SafetyLevel — classify any boto3 method as READ/WRITE/DESTRUCTIVE/BLOCKED
-2. BLOCKED_OPERATIONS — hard deny list (derived from CloudFormation STANDARD tier)
-3. DANGEROUS_PATTERNS — conditional blocks (SG 0.0.0.0/0, public S3, etc.)
-4. NEVER_ALLOWED — block only account-level dangerous services, everything else allowed
-5. validate_operation() — boto3 introspection (does method actually exist?)
+1. SafetyLevel â€” classify any boto3 method as READ/WRITE/DESTRUCTIVE/BLOCKED
+2. BLOCKED_OPERATIONS â€” hard deny list (derived from CloudFormation STANDARD tier)
+3. DANGEROUS_PATTERNS â€” conditional blocks (SG 0.0.0.0/0, public S3, etc.)
+4. NEVER_ALLOWED â€” block only account-level dangerous services, everything else allowed
+5. validate_operation() â€” boto3 introspection (does method actually exist?)
 """
 
 import re
@@ -55,12 +55,12 @@ class OperationSafety:
     confirmation_message: Optional[str] = None
 
 
-# Method prefix → SafetyLevel
+# Method prefix â†’ SafetyLevel
 # IAM operations that bypass the blanket IAM write block and go to parameter inspection.
 # These are allow/deny decided by _check_iam_policy_attach / _check_iam_policy_detach.
 _IAM_PARAM_GATED_OPS: Set[str] = {"attach_role_policy", "detach_role_policy"}
 
-# AWS-managed policies that can never be attached — grant excessive account-wide permissions.
+# AWS-managed policies that can never be attached â€” grant excessive account-wide permissions.
 # Everything else under arn:aws:iam::aws:policy/* is allowed (with canvas confirmation).
 _BLOCKED_IAM_MANAGED_POLICIES: Set[str] = {
     "arn:aws:iam::aws:policy/AdministratorAccess",
@@ -90,6 +90,11 @@ _DESTRUCTIVE_PREFIXES = (
     "stop_", "revoke_", "purge_", "unassign_", "untag_",
 )
 
+# Trust-phase: keyword-level hard block for all delete/terminate/purge ops.
+# Catches every AWS service (current + future) without per-service enumeration.
+# Specific security/backdoor blocks (EventBridge, SSM activation, etc.) remain in BLOCKED_OPERATIONS.
+_DELETE_KEYWORDS: frozenset = frozenset({"delete", "terminate", "purge"})
+
 
 def classify_operation(
     service: str,
@@ -100,7 +105,7 @@ def classify_operation(
     Classify a boto3 operation by safety level.
 
     Checks blocked operations first, then classifies by method prefix.
-    Unknown methods default to WRITE (fail-safe — requires confirmation).
+    Unknown methods default to WRITE (fail-safe â€” requires confirmation).
 
     Args:
         service: AWS service name (e.g., "ec2", "s3")
@@ -110,15 +115,26 @@ def classify_operation(
     Returns:
         OperationSafety with level, message, and optional warnings
     """
-    # 1. Check service scope — block only account-level dangerous services
+    # Normalize inputs â€” prevents case-bypass ("STS" slipping past lowercase "sts" check)
+    service = service.strip().lower()
+
+    # 1. Check service scope â€” block only account-level dangerous services
     if service in NEVER_ALLOWED:
         return OperationSafety(
             level=SafetyLevel.BLOCKED,
-            message=f"Service '{service}' is blocked — account-level security risk.",
+            message=f"Service '{service}' is blocked â€” account-level security risk.",
         )
 
     # 2. Normalize operation to lowercase for ALL checks (case-insensitive matching)
     op_lower = operation.lower()
+
+    # 2b. Trust-phase: hard-block all delete/terminate/purge operations globally.
+    # Simpler and more complete than per-service BLOCKED_OPERATIONS entries for deletions.
+    if any(kw in op_lower for kw in _DELETE_KEYWORDS):
+        return OperationSafety(
+            level=SafetyLevel.BLOCKED,
+            message=f"'{service}.{operation}' is blocked â€” delete and terminate operations are currently disabled. Use the AWS console for resource removal.",
+        )
 
     # 3. Check blocked operations (using lowercase to prevent case bypass)
     blocked_ops = BLOCKED_OPERATIONS.get(service, set())
@@ -129,7 +145,7 @@ def classify_operation(
             message=custom_msg or f"'{service}.{operation}' is blocked for safety. This operation is too destructive for the generic executor.",
         )
 
-    # 4. Special case: IAM writes blocked — except param-gated ops which go to pattern checking.
+    # 4. Special case: IAM writes blocked â€” except param-gated ops which go to pattern checking.
     if service == "iam" and op_lower not in _IAM_PARAM_GATED_OPS:
         if not any(op_lower.startswith(p) for p in _READ_PREFIXES):
             return OperationSafety(
@@ -137,7 +153,7 @@ def classify_operation(
                 message="IAM write operations are blocked. Use curated IAM tools instead.",
             )
 
-    # 4b. SSM Parameter Store: reads are free (including SecureString) — user consented on connect.
+    # 4b. SSM Parameter Store: reads are free (including SecureString) â€” user consented on connect.
     # Writes confirmed, deletes blocked.
     if service == "ssm" and op_lower in ("get_parameter", "get_parameters", "get_parameters_by_path"):
         return OperationSafety(level=SafetyLevel.READ, message=f"Read operation: ssm.{operation}")
@@ -149,7 +165,7 @@ def classify_operation(
         param_value = params.get("Value", "")
 
         if param_type == "SecureString":
-            value_preview = "[SecureString — value hidden]"
+            value_preview = "[SecureString â€” value hidden]"
         else:
             value_preview = (str(param_value)[:50] + "...") if len(str(param_value)) > 50 else str(param_value)
 
@@ -172,7 +188,7 @@ def classify_operation(
     if sensitive_key in _SENSITIVE_READ_OPERATIONS:
         return OperationSafety(
             level=SafetyLevel.BLOCKED,
-            message=f"'{service}.{operation}' is blocked — exposes sensitive data (secrets, credentials, keys).",
+            message=f"'{service}.{operation}' is blocked â€” exposes sensitive data (secrets, credentials, keys).",
         )
 
     if any(op_lower.startswith(p) for p in _READ_PREFIXES):
@@ -189,7 +205,7 @@ def classify_operation(
         )
         return OperationSafety(
             level=SafetyLevel.DESTRUCTIVE,
-            message=f"DESTRUCTIVE: {service}.{operation} — this may cause data loss or service disruption.",
+            message=f"DESTRUCTIVE: {service}.{operation} â€” this may cause data loss or service disruption.",
             cost_warning=cost_warning,
             confirmation_message=confirm_msg,
         )
@@ -207,7 +223,7 @@ def classify_operation(
             confirmation_message=confirm_msg,
         )
 
-    # 5. Unknown method — default to WRITE (fail-safe, requires confirmation)
+    # 5. Unknown method â€” default to WRITE (fail-safe, requires confirmation)
     logger.warning(f"Unknown method prefix for {service}.{operation}, defaulting to WRITE")
     return OperationSafety(
         level=SafetyLevel.WRITE,
@@ -228,9 +244,9 @@ _SENSITIVE_READ_OPERATIONS: Set[Tuple[str, str]] = {
 # =============================================================================
 # B. Blocked Operations (derived from CloudFormation STANDARD tier deny list)
 # =============================================================================
-# Converted from IAM PascalCase → boto3 snake_case.
+# Converted from IAM PascalCase â†’ boto3 snake_case.
 # Source: config/cloudformation_generator.py get_standard_permissions() lines 193-291
-# This is a one-time conversion — maintained here, not parsed at runtime.
+# This is a one-time conversion â€” maintained here, not parsed at runtime.
 
 BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
     "ec2": {
@@ -247,16 +263,16 @@ BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
         "delete_route",
         "delete_network_interface",
         "release_address",
-        # Disconnect operations — breaks infrastructure just like deletes
+        # Disconnect operations â€” breaks infrastructure just like deletes
         "disassociate_route_table",
         "detach_internet_gateway",
         "detach_vpn_gateway",
         "detach_network_interface",
-        # delete_launch_template, delete_placement_group — allowed with confirmation (AWS blocks if in use)
+        # delete_launch_template, delete_placement_group â€” allowed with confirmation (AWS blocks if in use)
     },
     "s3": {
         "delete_bucket",
-        "delete_objects",   # Bulk object deletion — can wipe entire bucket contents
+        "delete_objects",   # Bulk object deletion â€” can wipe entire bucket contents
     },
     "rds": {
         "delete_db_instance",
@@ -270,15 +286,15 @@ BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
     "lambda": {
         "delete_function",
         "delete_layer_version",
-        "invoke",           # Arbitrary code execution — too dangerous for generic executor
-        "invoke_async",     # Deprecated but still works — same risk as invoke
-        # delete_alias, delete_event_source_mapping — allowed with confirmation (low blast radius)
+        "invoke",           # Arbitrary code execution â€” too dangerous for generic executor
+        "invoke_async",     # Deprecated but still works â€” same risk as invoke
+        # delete_alias, delete_event_source_mapping â€” allowed with confirmation (low blast radius)
     },
     "ecs": {
         "delete_cluster",
         "delete_service",
         "deregister_container_instance",
-        # deregister_task_definition — allowed with confirmation (marks inactive, running tasks unaffected)
+        # deregister_task_definition â€” allowed with confirmation (marks inactive, running tasks unaffected)
     },
     "ecr": {
         "delete_repository",
@@ -287,8 +303,8 @@ BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
     "elbv2": {
         "delete_load_balancer",
         "delete_listener",
-        # delete_target_group — allowed with confirmation (AWS blocks if in use by listener)
-        # delete_rule — allowed with confirmation (routing rule, not the listener)
+        # delete_target_group â€” allowed with confirmation (AWS blocks if in use by listener)
+        # delete_rule â€” allowed with confirmation (routing rule, not the listener)
     },
     "elb": {
         "delete_load_balancer",
@@ -296,15 +312,15 @@ BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
     "autoscaling": {
         "delete_auto_scaling_group",
         "delete_launch_configuration",
-        # delete_policy, delete_scheduled_action — allowed with confirmation (ASG itself unaffected)
+        # delete_policy, delete_scheduled_action â€” allowed with confirmation (ASG itself unaffected)
     },
     "route53": {
         "delete_hosted_zone",
-        # delete_health_check — allowed with confirmation (health check only, not the DNS record)
+        # delete_health_check â€” allowed with confirmation (health check only, not the DNS record)
     },
     "cloudformation": {
         "delete_stack",
-        # delete_change_set — allowed with confirmation (pending change only, nothing deployed)
+        # delete_change_set â€” allowed with confirmation (pending change only, nothing deployed)
     },
     "cloudfront": {
         "delete_distribution",
@@ -318,7 +334,7 @@ BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
     },
     "cloudwatch": {
         "delete_alarms",
-        # delete_dashboards — allowed with confirmation (purely cosmetic)
+        # delete_dashboards â€” allowed with confirmation (purely cosmetic)
     },
     "logs": {
         "delete_log_group",
@@ -342,24 +358,24 @@ BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
     },
     "kms": {
         "schedule_key_deletion",  # Makes ALL data encrypted with this key permanently unrecoverable
-        "delete_key",             # Same — catastrophic, irreversible
+        "delete_key",             # Same â€” catastrophic, irreversible
     },
     "dynamodb": {
-        "delete_table",           # Data loss — no recovery without backup
+        "delete_table",           # Data loss â€” no recovery without backup
     },
     "secretsmanager": {
         "delete_secret",          # Loses stored credentials/keys permanently
     },
-    # Audit + monitoring layer — disabling these blinds you during an incident
+    # Audit + monitoring layer â€” disabling these blinds you during an incident
     "cloudtrail": {
         "delete_trail",           # Destroys audit history permanently
-        "stop_logging",           # Silences audit trail — attacker's first move
+        "stop_logging",           # Silences audit trail â€” attacker's first move
     },
     "guardduty": {
         "delete_detector",                        # Removes threat detection entirely
         "disassociate_members",                   # Disconnects member accounts from detection
-        "disassociate_from_master_account",       # Older API — same effect
-        "disassociate_from_administrator_account",# Newer API — same effect
+        "disassociate_from_master_account",       # Older API â€” same effect
+        "disassociate_from_administrator_account",# Newer API â€” same effect
     },
     "config": {
         "delete_configuration_recorder",  # Removes compliance tracking
@@ -367,10 +383,10 @@ BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
         "delete_delivery_channel",        # Stops Config from recording to S3/SNS
     },
     "iam": {
-        # Identity/credential creation — blocked regardless of the blanket IAM write rule
-        "create_access_key",      # Long-lived credentials — theft risk
-        "create_login_profile",   # Console password — expands attack surface
-        "create_user",            # New identity — out of scope for Liberra
+        # Identity/credential creation â€” blocked regardless of the blanket IAM write rule
+        "create_access_key",      # Long-lived credentials â€” theft risk
+        "create_login_profile",   # Console password â€” expands attack surface
+        "create_user",            # New identity â€” out of scope for Liberra
         "add_user_to_group",      # Privilege escalation vector
     },
     # IAM writes are ALL blocked (separate check in classify_operation)
@@ -441,7 +457,7 @@ def _check_sg_ingress(params: dict) -> PatternResult:
             str(params.get("IpProtocol", "")),
         ))
 
-    # IpPermissions array format — check ALL entries, not just the first
+    # IpPermissions array format â€” check ALL entries, not just the first
     for perm in params.get("IpPermissions", []):
         perm_open = False
         for ip_range in perm.get("IpRanges", []):
@@ -469,7 +485,7 @@ def _check_sg_ingress(params: dict) -> PatternResult:
     has_non_sensitive = False
 
     for from_port, to_port, ip_protocol in open_ranges:
-        # IpProtocol "-1" means ALL traffic (all ports, all protocols) — block immediately
+        # IpProtocol "-1" means ALL traffic (all ports, all protocols) â€” block immediately
         if ip_protocol == "-1":
             has_all_ports = True
             continue
@@ -699,18 +715,18 @@ def _check_modify_instance_attribute(params: dict) -> PatternResult:
     """Block dangerous instance attribute modifications."""
     attr = params.get("Attribute", "")
 
-    # UserData modification can inject startup scripts — very dangerous
+    # UserData modification can inject startup scripts â€” very dangerous
     # Handles both old-style (Attribute="userData") and modern (UserData={...})
     if attr == "userData" or "UserData" in params:
         return PatternResult(
             blocked=True,
-            message="Modifying instance UserData is blocked — can inject arbitrary startup scripts.",
+            message="Modifying instance UserData is blocked â€” can inject arbitrary startup scripts.",
         )
 
     # Instance type change: warn about ENA requirement for modern families
     if attr == "instanceType" or "InstanceType" in params:
         return PatternResult(
-            warning="Verify ENA is enabled before changing to t3/m5/c5/r5/newer families — instance will fail to start if ENA is disabled.",
+            warning="Verify ENA is enabled before changing to t3/m5/c5/r5/newer families â€” instance will fail to start if ENA is disabled.",
         )
 
     # Security group changes via generic executor should use curated sg tools
@@ -818,7 +834,7 @@ def _check_ec2_create_route(params: dict) -> PatternResult:
 
 def _check_ssm_send_command(params: dict) -> PatternResult:
     """Check SSM send_command for dangerous commands, blast radius, and document name."""
-    # 0. Validate DocumentName — warn on non-standard documents
+    # 0. Validate DocumentName â€” warn on non-standard documents
     doc_name = params.get("DocumentName", "AWS-RunShellScript")
     if doc_name not in ("AWS-RunShellScript", "AWS-RunPowerShellScript"):
         return PatternResult(
@@ -842,7 +858,7 @@ def _check_ssm_send_command(params: dict) -> PatternResult:
         if not safe:
             return PatternResult(
                 blocked=True,
-                message=f"Blocked: {reason} — command: {cmd[:80]}",
+                message=f"Blocked: {reason} â€” command: {cmd[:80]}",
             )
 
     # 2. Check instance count (blast radius)
@@ -867,7 +883,7 @@ def _check_ssm_send_command(params: dict) -> PatternResult:
     return PatternResult()
 
 
-# Destructive SSM Automation documents — hard deny list
+# Destructive SSM Automation documents â€” hard deny list
 _BLOCKED_AUTOMATION_DOCS = {
     "AWS-TerminateEC2Instance",
     "AWS-DeleteImage",
@@ -910,13 +926,13 @@ def _check_iam_policy_attach(params: dict) -> PatternResult:
         policy_name = policy_arn.split("/")[-1]
         return PatternResult(
             blocked=True,
-            message=f"'{policy_name}' cannot be attached — grants excessive account-wide permissions.",
+            message=f"'{policy_name}' cannot be attached â€” grants excessive account-wide permissions.",
         )
     return PatternResult()
 
 
 def _check_iam_policy_detach(params: dict) -> PatternResult:
-    """Detaching reduces access — allow any valid ARN."""
+    """Detaching reduces access â€” allow any valid ARN."""
     if not params.get("PolicyArn"):
         return PatternResult(blocked=True, message="PolicyArn is required.")
     return PatternResult()
@@ -950,7 +966,7 @@ _PATTERN_CHECKERS = {
 # FLIPPED: Block only what can nuke an account. Everything else is allowed.
 # Individual dangerous OPERATIONS are blocked in BLOCKED_OPERATIONS above.
 # Writes go through the confirmation gate. Reads auto-approve.
-ALLOWED_SERVICES = None  # No allowlist — everything not in NEVER_ALLOWED is allowed
+ALLOWED_SERVICES = None  # No allowlist â€” everything not in NEVER_ALLOWED is allowed
 
 NEVER_ALLOWED: Set[str] = {
     "organizations",    # Can remove accounts from org
@@ -966,7 +982,7 @@ NEVER_ALLOWED: Set[str] = {
 # E. Method Validation (boto3 introspection)
 # =============================================================================
 
-# Cache for validated service clients (service_name → set of valid methods)
+# Cache for validated service clients (service_name â†’ set of valid methods)
 _method_cache: Dict[str, Set[str]] = {}
 
 
@@ -982,7 +998,7 @@ def validate_operation(service: str, operation: str) -> Tuple[bool, str]:
         operation: boto3 method name
 
     Returns:
-        (valid, error_message) — valid=True if method exists
+        (valid, error_message) â€” valid=True if method exists
     """
     try:
         methods = _get_service_methods(service)
@@ -1036,13 +1052,13 @@ _COST_WARNINGS: Dict[str, str] = {
     "ecs:create_service": "ECS services run tasks continuously.",
     "cloudfront:create_distribution": "CloudFront charges per request + data transfer.",
     "dynamodb:create_table": "DynamoDB charges for read/write capacity.",
-    # Paid security services — always-on subscriptions, charged per resource/month
+    # Paid security services â€” always-on subscriptions, charged per resource/month
     "inspector2:enable": "AWS Inspector costs ~$1.18/instance/month for EC2 scanning. Billing starts immediately for every enabled instance.",
     "inspector2:enable_delegated_admin_account": "AWS Inspector costs ~$1.18/instance/month. Enabling org-wide delegation applies to all accounts.",
     "guardduty:create_detector": "AWS GuardDuty costs ~$4/instance/month for threat detection. Billing starts immediately.",
     "guardduty:create_members": "GuardDuty member accounts each incur ~$4/instance/month.",
     "macie2:enable_macie": "AWS Macie costs ~$1/GB of S3 data scanned per month. Billing starts on enablement.",
-    "macie2:enable_organization_admin_account": "AWS Macie org-wide enablement — costs apply to all member accounts (~$1/GB scanned).",
+    "macie2:enable_organization_admin_account": "AWS Macie org-wide enablement â€” costs apply to all member accounts (~$1/GB scanned).",
     "securityhub:enable_security_hub": "AWS Security Hub costs ~$0.001 per security finding ingested per month.",
     "wafv2:create_web_acl": "AWS WAF costs ~$5/web ACL/month + $1 per million requests processed.",
     "shield:create_subscription": "AWS Shield Advanced costs $3,000/month minimum. This is a major financial commitment.",
@@ -1078,13 +1094,13 @@ _CONFIRMATION_MESSAGES: Dict[str, str] = {
         "Stopped instances still incur EBS storage costs."
     ),
     "ec2:terminate_instances": (
-        "PERMANENTLY destroys instances and all local storage. Cannot be undone."
+        "âš ï¸ PERMANENTLY destroys instances and all local storage. Cannot be undone."
     ),
     "ec2:reboot_instances": (
         "Rebooting instances causes ~1-2 minutes of downtime."
     ),
     "rds:stop_db_instance": (
-        "AWS auto-restarts stopped RDS instances after 7 days — this is AWS-enforced. "
+        "AWS auto-restarts stopped RDS instances after 7 days â€” this is AWS-enforced. "
         "Data is preserved but storage charges continue."
     ),
     "rds:modify_db_instance": (
