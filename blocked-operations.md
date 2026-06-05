@@ -108,7 +108,7 @@ All IAM write operations are blocked. The only exceptions are `attach_role_polic
 
 ## Per-service reference: what the keyword block catches
 
-The table below is for reference. All of these are already caught by the universal keyword block above — they do not need to be individually enumerated for enforcement. They are listed here so you can verify specific operations by name.
+The operations below all contain `delete`, `terminate`, or `purge` in their name and are caught by the universal keyword block. Listed here so you can verify specific operations by name.
 
 ### EC2
 
@@ -126,7 +126,6 @@ The table below is for reference. All of these are already caught by the univers
 | `delete_route_table` | Breaks routing for associated subnets |
 | `delete_route` | Breaks specific routing rules |
 | `delete_network_interface` | Can disconnect running instances |
-| `release_address` | Releases Elastic IP — may break DNS/connections |
 
 ### S3
 
