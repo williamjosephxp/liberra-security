@@ -53,18 +53,19 @@ Every request passes through an application safety layer before reaching AWS. Se
 
 Six services are blocked entirely, no operation ever: `organizations`, `sts`, `account`, `sso`, `sso-admin`, `identitystore`
 
-Key operations blocked in code:
+**All delete, terminate, and purge operations are hard-blocked.** Any boto3 method with `delete`, `terminate`, or `purge` in its name is classified as `BLOCKED` before it reaches AWS — across every AWS service, with no exceptions. This is a keyword check in code, not a per-operation list. It covers EKS, ElastiCache, Kinesis, Glue, Redshift, Lightsail, and any service AWS adds in the future automatically.
 
-| Service | Blocked |
-|---|---|
-| EC2 | terminate_instances, VPC/subnet/IGW/SG deletion, network disconnect operations |
-| S3 | delete_bucket, bulk delete_objects |
-| RDS | delete_db_instance, delete_db_cluster, all schema objects |
-| Lambda | delete_function, invoke (arbitrary code execution) |
-| ECS / ECR | delete_cluster, delete_service, delete_repository |
-| IAM | all write operations |
-| Messaging | delete_topic, delete_queue |
-| Audit | delete_trail, stop_logging, delete_detector |
+Additional operations blocked for security reasons — these do not follow the delete/terminate/purge naming pattern but are blocked because they create backdoors or blind spots:
+
+| Service | Blocked | Why |
+|---|---|---|
+| Lambda | `invoke`, `invoke_async` | Arbitrary code execution |
+| EventBridge | `put_rule`, `put_targets` | Can create persistent scheduled automation |
+| SSM | `create_activation`, `create_association`, `create_document` | Managed instance backdoor vectors |
+| CloudTrail | `stop_logging` | Silences audit trail |
+| GuardDuty | `disassociate_members`, `disassociate_from_master_account`, `disassociate_from_administrator_account` | Disconnects threat detection |
+| Config | `stop_configuration_recorder` | Pauses compliance recording |
+| IAM | all write operations | Identity changes out of scope |
 
 Specific dangerous parameter combinations are also blocked regardless of operation: opening ports to `0.0.0.0/0`, public S3 bucket policies, RDS deletion without a final snapshot.
 
