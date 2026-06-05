@@ -6,6 +6,32 @@ This is in addition to the [IAM-level deny list](./iam-policy.json), which is en
 
 ---
 
+## Universal keyword block
+
+The first check in `classify_operation()` is a keyword test: if the boto3 method name contains `delete`, `terminate`, or `purge`, the operation is immediately classified as `BLOCKED` — before any service-specific checks run.
+
+```python
+_DELETE_KEYWORDS = frozenset({"delete", "terminate", "purge"})
+
+if any(kw in op_lower for kw in _DELETE_KEYWORDS):
+    return OperationSafety(level=SafetyLevel.BLOCKED, ...)
+```
+
+This means:
+
+- `eks.delete_cluster` → BLOCKED
+- `elasticache.delete_replication_group` → BLOCKED
+- `emr.terminate_job_flows` → BLOCKED
+- `kinesis.delete_stream` → BLOCKED
+- `redshift.delete_cluster` → BLOCKED
+- `lightsail.delete_instance` → BLOCKED
+- `sqs.purge_queue` → BLOCKED
+- Any service AWS adds in the future → BLOCKED automatically
+
+No enumeration required. No per-service list to maintain. The keyword check covers all of AWS, present and future.
+
+---
+
 ## Services blocked entirely
 
 These 6 services are never accessible through Liberra under any circumstances:
@@ -21,7 +47,68 @@ These 6 services are never accessible through Liberra under any circumstances:
 
 ---
 
-## Per-service blocked operations
+## Additional blocked operations (security and backdoor prevention)
+
+The operations below do not contain `delete`, `terminate`, or `purge` in their names but are blocked because they create backdoors, enable persistent automation, or destroy security visibility.
+
+### Lambda
+
+| Operation | Reason |
+|-----------|--------|
+| `invoke` | Arbitrary code execution — too dangerous for generic executor |
+| `invoke_async` | Same risk as invoke |
+
+### EventBridge
+
+| Operation | Reason |
+|-----------|--------|
+| `put_rule` | Can create persistent scheduled automation — backdoor risk |
+| `put_targets` | Can attach targets to rules (invoke Lambda, etc.) |
+
+### SSM
+
+| Operation | Reason |
+|-----------|--------|
+| `create_activation` | Registers external machines into your SSM fleet — identity backdoor |
+| `create_association` | Creates a persistent scheduled command on your instances — persistence vector |
+| `create_document` | Stores a reusable automation script — code injection vehicle |
+
+### CloudTrail
+
+| Operation | Reason |
+|-----------|--------|
+| `stop_logging` | Silences audit trail — first move in an account compromise |
+
+### GuardDuty
+
+| Operation | Reason |
+|-----------|--------|
+| `disassociate_members` | Disconnects member accounts from threat detection |
+| `disassociate_from_master_account` | Removes account from threat detection (older API) |
+| `disassociate_from_administrator_account` | Same — newer API |
+
+### Config
+
+| Operation | Reason |
+|-----------|--------|
+| `stop_configuration_recorder` | Pauses compliance tracking |
+
+### IAM
+
+All IAM write operations are blocked. The only exceptions are `attach_role_policy` and `detach_role_policy`, which are allowed with canvas confirmation — but only for AWS-managed policies, and never for policies that grant admin-level access (`AdministratorAccess`, `PowerUserAccess`, `IAMFullAccess`).
+
+| Operation | Reason |
+|-----------|--------|
+| `create_access_key` | Long-lived credentials — theft risk |
+| `create_login_profile` | Expands attack surface |
+| `create_user` | New identity — out of scope |
+| `add_user_to_group` | Privilege escalation vector |
+
+---
+
+## Per-service reference: what the keyword block catches
+
+The table below is for reference. All of these are already caught by the universal keyword block above — they do not need to be individually enumerated for enforcement. They are listed here so you can verify specific operations by name.
 
 ### EC2
 
@@ -40,10 +127,6 @@ These 6 services are never accessible through Liberra under any circumstances:
 | `delete_route` | Breaks specific routing rules |
 | `delete_network_interface` | Can disconnect running instances |
 | `release_address` | Releases Elastic IP — may break DNS/connections |
-| `disassociate_route_table` | Disconnects subnet from routing |
-| `detach_internet_gateway` | Cuts VPC internet access |
-| `detach_vpn_gateway` | Cuts VPN connectivity |
-| `detach_network_interface` | Can disconnect running instances |
 
 ### S3
 
@@ -62,7 +145,6 @@ These 6 services are never accessible through Liberra under any circumstances:
 | `delete_db_parameter_group` | Can break dependent instances |
 | `delete_db_cluster_parameter_group` | Can break dependent clusters |
 | `delete_option_group` | Can break dependent instances |
-| `delete_event_subscription` | Removes monitoring notifications |
 
 ### Lambda
 
@@ -70,25 +152,16 @@ These 6 services are never accessible through Liberra under any circumstances:
 |-----------|--------|
 | `delete_function` | Permanent |
 | `delete_layer_version` | Permanent — may break functions using this layer |
-| `invoke` | Arbitrary code execution — too dangerous for generic executor |
-| `invoke_async` | Same risk as invoke |
 
-### ECS
+### ECS / ECR
 
 | Operation | Reason |
 |-----------|--------|
 | `delete_cluster` | Destroys all services and tasks |
 | `delete_service` | Stops running service |
-| `deregister_container_instance` | Removes instance from cluster |
-
-### ECR
-
-| Operation | Reason |
-|-----------|--------|
 | `delete_repository` | Permanent — all images lost |
-| `batch_delete_image` | Permanent bulk image deletion |
 
-### Load Balancers (ELBv2 / ELB)
+### Load Balancers
 
 | Operation | Reason |
 |-----------|--------|
@@ -127,36 +200,15 @@ These 6 services are never accessible through Liberra under any circumstances:
 |-----------|--------|
 | `delete_topic` | All subscriptions lost |
 | `delete_queue` | All messages and configuration lost |
+| `purge_queue` | Wipes all messages from queue |
 
-### CloudWatch
+### CloudWatch / Logs
 
 | Operation | Reason |
 |-----------|--------|
 | `delete_alarms` | Removes monitoring alerts |
 | `delete_log_group` | Permanent log data loss |
 | `delete_log_stream` | Permanent log data loss |
-
-### EventBridge
-
-| Operation | Reason |
-|-----------|--------|
-| `put_rule` | Could create persistent scheduled automation |
-| `put_targets` | Could attach targets to rules (e.g. invoke Lambda) |
-| `delete_rule` | Destructive |
-| `remove_targets` | Destructive |
-
-### SSM
-
-| Operation | Reason |
-|-----------|--------|
-| `create_activation` | Creates managed instance activations |
-| `delete_activation` | Destructive |
-| `create_association` | Creates persistent document associations |
-| `delete_association` | Destructive |
-| `create_document` | Creates reusable automation documents |
-| `delete_document` | Destructive |
-| `delete_parameter` | Permanent parameter loss |
-| `delete_parameters` | Permanent bulk parameter loss |
 
 ### KMS
 
@@ -182,35 +234,19 @@ These 6 services are never accessible through Liberra under any circumstances:
 | Operation | Reason |
 |-----------|--------|
 | `delete_trail` | Destroys audit history permanently |
-| `stop_logging` | Silences audit trail — disables security visibility |
 
 ### GuardDuty
 
 | Operation | Reason |
 |-----------|--------|
 | `delete_detector` | Removes threat detection entirely |
-| `disassociate_members` | Disconnects member accounts from detection |
-| `disassociate_from_master_account` | Removes account from threat detection |
-| `disassociate_from_administrator_account` | Same — newer API |
 
 ### Config
 
 | Operation | Reason |
 |-----------|--------|
 | `delete_configuration_recorder` | Removes compliance tracking |
-| `stop_configuration_recorder` | Pauses compliance tracking |
 | `delete_delivery_channel` | Stops Config from recording to S3/SNS |
-
-### IAM
-
-All IAM write operations are blocked. The only exceptions are `attach_role_policy` and `detach_role_policy`, which are allowed with canvas confirmation — but only for AWS-managed policies, and never for policies that grant admin-level access (`AdministratorAccess`, `PowerUserAccess`, `IAMFullAccess`).
-
-| Operation | Reason |
-|-----------|--------|
-| `create_access_key` | Long-lived credentials — theft risk |
-| `create_login_profile` | Expands attack surface |
-| `create_user` | New identity — out of scope |
-| `add_user_to_group` | Privilege escalation vector |
 
 ---
 
