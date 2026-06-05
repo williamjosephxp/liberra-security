@@ -13,7 +13,11 @@ Two protections are built into every connection:
 - **External ID** — the role's trust policy requires a unique ID tied to your Liberra account. Nothing can assume the role without it.
 - **1-hour sessions** — STS tokens expire after 60 minutes and rotate automatically. No long-lived credentials stored anywhere.
 
-To revoke: delete the `liberra-standard-*` CloudFormation stack. Access is gone immediately.
+---
+
+## You are always in control
+
+Liberra does not control your AWS account. You do. The IAM role lives in your account, not ours. To revoke all access, delete the `liberra-standard-*` CloudFormation stack. Access is gone immediately. No support ticket, no waiting, nothing to clean up on our end.
 
 ---
 
