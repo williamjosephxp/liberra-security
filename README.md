@@ -19,6 +19,12 @@ To revoke: delete the `liberra-standard-*` CloudFormation stack. Access is gone 
 
 ---
 
+## You are always in control
+
+Liberra does not control your AWS account. You do. The IAM role lives in your account, not ours. To revoke all access, delete the `liberra-standard-*` CloudFormation stack. Access is gone immediately. No support ticket, no waiting, nothing to clean up on our end.
+
+---
+
 ## Free vs Pro
 
 | | Free | Pro |
