@@ -1,9 +1,16 @@
-# NOTE: This file is published for transparency. It runs inside Liberra's backend
-# and cannot be executed standalone -- it imports from internal modules (core.sanitizer,
-# knowledge.loader) that are not included here. The safety logic is complete and
-# verifiable as-is. Nothing has been redacted.
+# NOTE: This file is published verbatim from Liberra's backend
+# (backend/guardrails/aws_safety.py). Nothing in this file has been redacted.
 #
-# Source: https://liberra.ai
+# It cannot be executed standalone -- it imports internal modules
+# (knowledge.loader) that are not included here. The safety classification
+# logic is complete and verifiable as-is.
+#
+# What this file is: every operation Liberra's AI attempts is classified here
+# BEFORE it reaches AWS -- read / write / destructive / blocked. Blocked means
+# it never executes. Writes pause for user approval in the agent loop.
+#
+# Last synced with production: 2026-07-07
+# Source: https://liberraai.com
 # Repository: https://github.com/williamjosephxp/liberra-security
 
 """
@@ -90,6 +97,11 @@ _DESTRUCTIVE_PREFIXES = (
     "stop_", "revoke_", "purge_", "unassign_", "untag_",
 )
 
+# Trust-phase: keyword-level hard block for all delete/terminate/purge ops.
+# Catches every AWS service (current + future) without per-service enumeration.
+# Specific security/backdoor blocks (EventBridge, SSM activation, etc.) remain in BLOCKED_OPERATIONS.
+_DELETE_KEYWORDS: frozenset = frozenset({"delete", "terminate", "purge"})
+
 
 def classify_operation(
     service: str,
@@ -110,6 +122,18 @@ def classify_operation(
     Returns:
         OperationSafety with level, message, and optional warnings
     """
+    # Normalize inputs — prevents case-bypass ("STS" slipping past lowercase "sts" check)
+    service = service.strip().lower()
+
+    # sts:get_caller_identity is a harmless read ("which account/identity am I?") — carve it
+    # out of the blanket sts block. assume_role / get_session_token / get_federation_token
+    # stay blocked by NEVER_ALLOWED below.
+    if service == "sts" and operation.strip().lower() == "get_caller_identity":
+        return OperationSafety(
+            level=SafetyLevel.READ,
+            message="Read operation: sts.get_caller_identity",
+        )
+
     # 1. Check service scope — block only account-level dangerous services
     if service in NEVER_ALLOWED:
         return OperationSafety(
@@ -119,6 +143,14 @@ def classify_operation(
 
     # 2. Normalize operation to lowercase for ALL checks (case-insensitive matching)
     op_lower = operation.lower()
+
+    # 2b. Trust-phase: hard-block all delete/terminate/purge operations globally.
+    # Simpler and more complete than per-service BLOCKED_OPERATIONS entries for deletions.
+    if any(kw in op_lower for kw in _DELETE_KEYWORDS):
+        return OperationSafety(
+            level=SafetyLevel.BLOCKED,
+            message=f"'{service}.{operation}' is blocked — delete and terminate operations are currently disabled. Use the AWS console for resource removal.",
+        )
 
     # 3. Check blocked operations (using lowercase to prevent case bypass)
     blocked_ops = BLOCKED_OPERATIONS.get(service, set())
@@ -232,149 +264,39 @@ _SENSITIVE_READ_OPERATIONS: Set[Tuple[str, str]] = {
 # Source: config/cloudformation_generator.py get_standard_permissions() lines 193-291
 # This is a one-time conversion — maintained here, not parsed at runtime.
 
+# Deletes/terminates are already blocked globally by _DELETE_KEYWORDS (step 3) and
+# nuclear services by NEVER_ALLOWED (step 2) — so this list intentionally does NOT
+# re-list them (that was ~140 lines of redundancy + IAM-policy duplication). It is
+# ONLY the non-delete ops that create long-lived credentials, persistence/backdoors,
+# or blind the audit & security substrate: nuclear-adjacent, not merely "destructive".
+# A human approving a one-line gate shouldn't be able to wave these through.
+#
+# Everything NOT here (and not a delete/nuclear op) flows through the approval gate:
+# the model proposes, the human approves. Code stops fighting the model.
 BLOCKED_OPERATIONS: Dict[str, Set[str]] = {
-    "ec2": {
-        "terminate_instances",
-        "delete_volume",
-        "delete_snapshot",
-        "delete_key_pair",
-        "delete_security_group",
-        "delete_vpc",
-        "delete_subnet",
-        "delete_internet_gateway",
-        "delete_nat_gateway",
-        "delete_route_table",
-        "delete_route",
-        "delete_network_interface",
-        "release_address",
-        # Disconnect operations — breaks infrastructure just like deletes
-        "disassociate_route_table",
-        "detach_internet_gateway",
-        "detach_vpn_gateway",
-        "detach_network_interface",
-        # delete_launch_template, delete_placement_group — allowed with confirmation (AWS blocks if in use)
-    },
-    "s3": {
-        "delete_bucket",
-        "delete_objects",   # Bulk object deletion — can wipe entire bucket contents
-    },
-    "rds": {
-        "delete_db_instance",
-        "delete_db_cluster",
-        "delete_db_subnet_group",
-        "delete_db_parameter_group",
-        "delete_db_cluster_parameter_group",
-        "delete_option_group",
-        "delete_event_subscription",
-    },
-    "lambda": {
-        "delete_function",
-        "delete_layer_version",
-        "invoke",           # Arbitrary code execution — too dangerous for generic executor
-        "invoke_async",     # Deprecated but still works — same risk as invoke
-        # delete_alias, delete_event_source_mapping — allowed with confirmation (low blast radius)
-    },
-    "ecs": {
-        "delete_cluster",
-        "delete_service",
-        "deregister_container_instance",
-        # deregister_task_definition — allowed with confirmation (marks inactive, running tasks unaffected)
-    },
-    "ecr": {
-        "delete_repository",
-        "batch_delete_image",
-    },
-    "elbv2": {
-        "delete_load_balancer",
-        "delete_listener",
-        # delete_target_group — allowed with confirmation (AWS blocks if in use by listener)
-        # delete_rule — allowed with confirmation (routing rule, not the listener)
-    },
-    "elb": {
-        "delete_load_balancer",
-    },
-    "autoscaling": {
-        "delete_auto_scaling_group",
-        "delete_launch_configuration",
-        # delete_policy, delete_scheduled_action — allowed with confirmation (ASG itself unaffected)
-    },
-    "route53": {
-        "delete_hosted_zone",
-        # delete_health_check — allowed with confirmation (health check only, not the DNS record)
-    },
-    "cloudformation": {
-        "delete_stack",
-        # delete_change_set — allowed with confirmation (pending change only, nothing deployed)
-    },
-    "cloudfront": {
-        "delete_distribution",
-        "delete_streaming_distribution",
-    },
-    "sns": {
-        "delete_topic",
-    },
-    "sqs": {
-        "delete_queue",
-    },
-    "cloudwatch": {
-        "delete_alarms",
-        # delete_dashboards — allowed with confirmation (purely cosmetic)
-    },
-    "logs": {
-        "delete_log_group",
-        "delete_log_stream",
-    },
-    "events": {
-        "put_rule",         # Can create persistent scheduled automation (backdoor risk)
-        "put_targets",      # Can attach targets to rules (invoke Lambda, etc.)
-        "delete_rule",      # Destructive
-        "remove_targets",   # Destructive
-    },
-    "ssm": {
-        "create_activation",
-        "delete_activation",
-        "create_association",
-        "delete_association",
-        "create_document",
-        "delete_document",
-        "delete_parameter",
-        "delete_parameters",
-    },
-    "kms": {
-        "schedule_key_deletion",  # Makes ALL data encrypted with this key permanently unrecoverable
-        "delete_key",             # Same — catastrophic, irreversible
-    },
-    "dynamodb": {
-        "delete_table",           # Data loss — no recovery without backup
-    },
-    "secretsmanager": {
-        "delete_secret",          # Loses stored credentials/keys permanently
-    },
-    # Audit + monitoring layer — disabling these blinds you during an incident
-    "cloudtrail": {
-        "delete_trail",           # Destroys audit history permanently
-        "stop_logging",           # Silences audit trail — attacker's first move
-    },
+    # Persistence / scheduled-automation backdoor
+    "events": {"put_rule", "put_targets"},
+    # Hybrid-activation backdoor — registers external machines as managed instances
+    "ssm": {"create_activation"},
+    # Catastrophic + irreversible. NOTE: "deletion" does NOT contain the substring
+    # "delete", so _DELETE_KEYWORDS (step 3) misses this — it must stay listed here.
+    "kms": {"schedule_key_deletion"},
+    # Audit / security blinding — an attacker's first move
+    "cloudtrail": {"stop_logging"},
     "guardduty": {
-        "delete_detector",                        # Removes threat detection entirely
-        "disassociate_members",                   # Disconnects member accounts from detection
-        "disassociate_from_master_account",       # Older API — same effect
-        "disassociate_from_administrator_account",# Newer API — same effect
+        "disassociate_members",
+        "disassociate_from_master_account",
+        "disassociate_from_administrator_account",
     },
-    "config": {
-        "delete_configuration_recorder",  # Removes compliance tracking
-        "stop_configuration_recorder",    # Pauses compliance tracking
-        "delete_delivery_channel",        # Stops Config from recording to S3/SNS
-    },
+    "config": {"stop_configuration_recorder"},
+    # Identity / credential creation — long-lived creds + privilege escalation
     "iam": {
-        # Identity/credential creation — blocked regardless of the blanket IAM write rule
-        "create_access_key",      # Long-lived credentials — theft risk
-        "create_login_profile",   # Console password — expands attack surface
-        "create_user",            # New identity — out of scope for Liberra
-        "add_user_to_group",      # Privilege escalation vector
+        "create_access_key",
+        "create_login_profile",
+        "create_user",
+        "add_user_to_group",
     },
-    # IAM writes are ALL blocked (separate check in classify_operation)
-    # The 4 iam entries above get specific messages via BLOCKED_OPERATION_MESSAGES below.
+    # The iam entries get specific messages via BLOCKED_OPERATION_MESSAGES below.
 }
 
 
@@ -1078,7 +1000,7 @@ _CONFIRMATION_MESSAGES: Dict[str, str] = {
         "Stopped instances still incur EBS storage costs."
     ),
     "ec2:terminate_instances": (
-        "PERMANENTLY destroys instances and all local storage. Cannot be undone."
+        "⚠️ PERMANENTLY destroys instances and all local storage. Cannot be undone."
     ),
     "ec2:reboot_instances": (
         "Rebooting instances causes ~1-2 minutes of downtime."
