@@ -2,7 +2,7 @@
 
 Liberra connects to your AWS account via a cross-account IAM role. This repo shows exactly what that role can do, what is blocked at the IAM level, what is blocked in code, and how to verify everything yourself.
 
-**Last synced with production: 2026-07-07.** The `aws_safety.py` in this repo is the file running in Liberra's backend, published verbatim.
+**Last synced with production: 2026-09-07, commit `9081d30`.** The `aws_safety.py` here is a byte-for-byte copy of that commit's file, and `iam-policy.json` is the policy that commit's generator produces. The commit is named so you can check rather than trust: if a claim here and the product ever disagree, the product wins and this file is the one that is wrong.
 
 ---
 
@@ -86,7 +86,32 @@ In the order the code checks them:
 
 The policy is in this repo: [`iam-policy.json`](./iam-policy.json)
 
-That file is generated from the same source code that builds every user's CloudFormation template. What you see there is exactly what gets deployed to your AWS account.
+That file is the policy produced by the same generator that builds every user's CloudFormation
+template, taken from commit `9081d30` — the commit currently deployed.
+
+It is a **copy**, refreshed by hand, not a live mirror. It was two months stale once; naming the
+commit is what makes that visible instead of invisible. If you want certainty rather than our word,
+don't read this file at all — read the role in your own account:
+
+```bash
+aws iam get-role-policy --role-name <your-liberra-role> --policy-name LiberraStandardPolicy
+```
+
+That is the only copy that can actually affect your infrastructure.
+
+### What is deliberately NOT in this repo yet
+
+A much broader IAM deny — an additional `DenyDestroy` statement covering **332 delete/terminate/purge
+actions**, derived from AWS's own service definitions — is **built and verified but not shipped.**
+We have run `iam:SimulateCustomPolicy` against it and AWS returns `explicitDeny` for every
+destructive action tested.
+
+It is not in `iam-policy.json` because **no customer role carries it yet**, and this repo documents
+what is deployed, not what is coming. When it ships, this file and this section change together.
+
+Today, deletes are stopped by Liberra's application layer (`aws_safety.py`, published here in full)
+plus the 16-action IAM deny in [`iam-policy.json`](./iam-policy.json) — not by a blanket
+IAM-level delete ban.
 
 ---
 

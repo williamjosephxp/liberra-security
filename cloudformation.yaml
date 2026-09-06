@@ -26,6 +26,10 @@ Resources:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # Two statements, deliberately: the sts:ExternalId context key only exists
+          # when evaluating sts:AssumeRole. A condition on it attached to
+          # sts:SetSourceIdentity can never match, so a combined statement denies
+          # the stamp even though the grant is present.
           - Effect: Allow
             Principal:
               AWS: 'arn:aws:iam::YOUR_LIBERRA_ACCOUNT_ID:root'
@@ -33,6 +37,13 @@ Resources:
             Condition:
               StringEquals:
                 'sts:ExternalId': 'YOUR_UNIQUE_EXTERNAL_ID_GENERATED_BY_LIBERRA'
+          - Effect: Allow
+            Principal:
+              AWS: 'arn:aws:iam::YOUR_LIBERRA_ACCOUNT_ID:root'
+            Action: 'sts:SetSourceIdentity'
+            Condition:
+              StringLike:
+                'sts:SourceIdentity': 'liberra-*'
       Policies:
         - PolicyName: LiberraStandardPolicy
           PolicyDocument:

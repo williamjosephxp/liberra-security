@@ -1,18 +1,3 @@
-# NOTE: This file is published verbatim from Liberra's backend
-# (backend/guardrails/aws_safety.py). Nothing in this file has been redacted.
-#
-# It cannot be executed standalone -- it imports internal modules
-# (knowledge.loader) that are not included here. The safety classification
-# logic is complete and verifiable as-is.
-#
-# What this file is: every operation Liberra's AI attempts is classified here
-# BEFORE it reaches AWS -- read / write / destructive / blocked. Blocked means
-# it never executes. Writes pause for user approval in the agent loop.
-#
-# Last synced with production: 2026-07-07
-# Source: https://liberraai.com
-# Repository: https://github.com/williamjosephxp/liberra-security
-
 """
 AWS Safety Layer — Generic Executor Guardrails
 
@@ -107,6 +92,7 @@ def classify_operation(
     service: str,
     operation: str,
     parameters: Optional[dict] = None,
+    declared: bool = False,
 ) -> OperationSafety:
     """
     Classify a boto3 operation by safety level.
@@ -118,6 +104,9 @@ def classify_operation(
         service: AWS service name (e.g., "ec2", "s3")
         operation: boto3 method name (e.g., "describe_instances")
         parameters: Optional parameters (for cost warnings)
+        declared: this call came from a DECLARED PLAN (a terraform diff), not from a
+            one-off API call. It narrows EXACTLY ONE rule — the blanket IAM-write block
+            in step 4 — and nothing else. See the block itself for why.
 
     Returns:
         OperationSafety with level, message, and optional warnings
@@ -162,7 +151,27 @@ def classify_operation(
         )
 
     # 4. Special case: IAM writes blocked — except param-gated ops which go to pattern checking.
-    if service == "iam" and op_lower not in _IAM_PARAM_GATED_OPS:
+    #
+    # ONE RULEBOOK, TWO DIALECTS. This blanket exists so `cloud_execute` cannot hand-craft
+    # IAM one call at a time: through that door a create_role is a single opaque API call,
+    # and a role with a foreign trust policy is as much a backdoor as a user. Its own
+    # message ("use curated IAM tools") is advice that only makes sense there.
+    #
+    # A DECLARED PLAN is a different act in the world, not a convenience: the whole trust
+    # policy and every attachment are in the HCL on the approve card, reviewed and approved
+    # as one unit. That is precisely the consent surface under which workload identity
+    # (role / instance profile / policy) is legitimate — Liberra's own born-operable design
+    # depends on it, which is why a previous attempt at generic plan translation was
+    # reverted: the blanket was applied WITHOUT the dialect. The dialect is what was
+    # missing, not a reason to stop classifying plans.
+    #
+    # It narrows this rule ONLY. Steps 1-3 have already run and still bind, so the ops that
+    # actually create identity or credentials — create_user, create_access_key,
+    # create_login_profile, add_user_to_group — are in BLOCKED_OPERATIONS and stay blocked
+    # in BOTH dialects. NEVER_ALLOWED, the global delete block and DANGEROUS_PATTERNS are
+    # untouched by it. Never model-reachable: it is set inside the plan-classification path
+    # (modules/terraform/plan_safety.py), never from a tool argument.
+    if service == "iam" and not declared and op_lower not in _IAM_PARAM_GATED_OPS:
         if not any(op_lower.startswith(p) for p in _READ_PREFIXES):
             return OperationSafety(
                 level=SafetyLevel.BLOCKED,
@@ -316,14 +325,38 @@ BLOCKED_OPERATION_MESSAGES: Dict[Tuple[str, str], str] = {
 
 @dataclass
 class PatternResult:
-    """Result of checking dangerous patterns."""
+    """Result of checking dangerous patterns.
+
+    exposure — set ONLY when the write puts something in front of the internet
+    (inbound from 0.0.0.0/0, a public storage endpoint, a public database). It is
+    the CONSEQUENCE in the user's words, phrased to be typed back: "open port 8080
+    to the internet". Empty for every other risky write, including cost and
+    reversibility warnings.
+
+    Why a typed field and not "does warning mention the internet". This class is
+    irreversible as CONSEQUENCE even where it is trivially reversible as config —
+    bots probe within minutes and data seen cannot be unseen — so it is the one
+    class that keeps hard friction forever, and the UI must be able to ask for it
+    without parsing prose. Each cloud's own checkers set it (azure_safety and
+    gcp_safety import this dataclass), so the decision stays where the rules are.
+    Note the harshest cases never get here at all: sensitive ports to 0.0.0.0/0,
+    public bucket policies and public ACLs are BLOCKED above, not exposed for
+    approval. This field covers what is genuinely allowed-but-consequential.
+    """
     blocked: bool = False
     warning: Optional[str] = None
     message: Optional[str] = None
+    exposure: Optional[str] = None
 
 
 # Ports that should never be open to 0.0.0.0/0
 _SENSITIVE_PORTS = {22, 3389, 3306, 5432, 27017, 6379, 1433, 9200, 9300, 5439}
+
+# The two ports whose entire purpose is to be public. Opening them to 0.0.0.0/0 is
+# what a web server IS, so they are gated like any write but never marked `exposure`
+# — friction that fires on the most common legitimate action is friction the user
+# learns to type through, and then it is worth nothing on the call that mattered.
+_PUBLIC_BY_PURPOSE_PORTS = {80, 443}
 
 
 def check_dangerous_patterns(
@@ -428,8 +461,18 @@ def _check_sg_ingress(params: dict) -> PatternResult:
         # Find first non-protocol-all entry for the warning message
         for fp, tp, proto in open_ranges:
             if proto != "-1" and fp is not None and tp is not None:
+                ports = f"port {fp}" if fp == tp else f"ports {fp}-{tp}"
+                # 80/443 alone is a web server being a web server — warn, don't
+                # demand the phrase (see _PUBLIC_BY_PURPOSE_PORTS).
+                # Only a SINGLE 80 or 443 is public-by-purpose: any contiguous range
+                # spanning both also spans 81, which is not.
+                try:
+                    only_web = int(fp) == int(tp) and int(fp) in _PUBLIC_BY_PURPOSE_PORTS
+                except (ValueError, TypeError):
+                    only_web = False
                 return PatternResult(
                     warning=f"Opening port {fp}-{tp} to 0.0.0.0/0. Ensure this is intended.",
+                    exposure=None if only_web else f"open {ports} to the internet",
                 )
 
     return PatternResult()
@@ -513,6 +556,7 @@ def _check_s3_public_access_block(params: dict) -> PatternResult:
             return PatternResult(
                 warning=f"Disabling public access block settings: {', '.join(disabled)}. "
                         f"This may expose the bucket publicly.",
+                exposure="remove public access protection from this bucket",
             )
     return PatternResult()
 
@@ -569,6 +613,25 @@ def _check_rds_create(params: dict) -> PatternResult:
         return PatternResult(
             warning="Creating a publicly accessible RDS instance. "
                     "Ensure security groups restrict access appropriately.",
+            exposure="give this database a public internet address",
+        )
+    return PatternResult()
+
+
+def _check_rds_modify(params: dict) -> PatternResult:
+    """Flag flipping an EXISTING database onto the public internet.
+
+    rds:modify_db_instance was already in ALWAYS_GATE_OPS (it re-prompts even under
+    session approval) but had no pattern checker at all — so the one modify that
+    actually changes exposure, PubliclyAccessible=True, reached the approve box
+    looking exactly like a storage resize. This is the create-time check applied to
+    the resource that already holds data, which is the worse of the two.
+    """
+    if params.get("PubliclyAccessible") is True:
+        return PatternResult(
+            warning="Making an existing RDS instance publicly accessible. "
+                    "It becomes reachable from the internet, subject to its security groups.",
+            exposure="give this database a public internet address",
         )
     return PatternResult()
 
@@ -857,6 +920,7 @@ _PATTERN_CHECKERS = {
     "s3:put_public_access_block": _check_s3_public_access_block,
     "rds:delete_db_instance": _check_rds_delete,
     "rds:create_db_instance": _check_rds_create,
+    "rds:modify_db_instance": _check_rds_modify,
     "dynamodb:batch_write_item": _check_dynamodb_batch_write,
     "ssm:send_command": _check_ssm_send_command,
     "ssm:start_automation_execution": _check_ssm_automation,
@@ -1023,16 +1087,22 @@ def full_safety_check(
     service: str,
     operation: str,
     parameters: Optional[dict] = None,
+    declared: bool = False,
 ) -> Tuple[OperationSafety, PatternResult]:
     """
     Run all safety checks for a generic executor operation.
+
+    `declared` rides through to classify_operation and narrows the blanket IAM-write
+    block ONLY (see there). check_dangerous_patterns never sees it: exposure, public
+    data and privilege-grant checks read parameters, and a plan is not a reason to
+    open a port.
 
     Returns:
         (safety, pattern_result)
         - safety: OperationSafety from classify_operation
         - pattern_result: PatternResult from check_dangerous_patterns
     """
-    safety = classify_operation(service, operation, parameters)
+    safety = classify_operation(service, operation, parameters, declared=declared)
     pattern = check_dangerous_patterns(service, operation, parameters)
 
     return safety, pattern
