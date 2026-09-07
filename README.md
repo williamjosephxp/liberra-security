@@ -1,120 +1,114 @@
-# Liberra Security Policy
+# Liberra Security
 
-Liberra connects to your AWS account via a cross-account IAM role. This repo shows exactly what that role can do, what is blocked at the IAM level, what is blocked in code, and how to verify everything yourself.
+What Liberra can and cannot do inside your cloud account, and how to check it without taking our word for anything.
 
-**Last synced with production: 2026-09-07, commit `9081d30`.** The `aws_safety.py` here is a byte-for-byte copy of that commit's file, and `iam-policy.json` is the policy that commit's generator produces. The commit is named so you can check rather than trust: if a claim here and the product ever disagree, the product wins and this file is the one that is wrong.
-
----
-
-## How it connects
-
-You deploy a CloudFormation stack that creates an IAM role in your AWS account. Liberra assumes that role via STS when acting on your behalf. Your credentials never leave your account.
-
-Two protections are built into every connection:
-
-- **External ID** — the role's trust policy requires a unique ID tied to your Liberra account. Nothing can assume the role without it.
-- **1-hour sessions** — STS tokens expire after 60 minutes and rotate automatically. No long-lived credentials stored anywhere.
-
-To revoke: delete the `liberra-standard-*` CloudFormation stack. Access is gone immediately.
+**Synced with production `9081d30`, 2026-09-07.** The three `*_safety.py` files here are byte-for-byte copies from that commit, and `aws/iam-policy.json` is what that commit's generator produces. The commit is named so you can check rather than trust. If this repo and the product ever disagree, the product wins and this repo is what is wrong.
 
 ---
 
-## You are always in control
+## What you grant
 
-Liberra does not control your AWS account. You do. The IAM role lives in your account, not ours. To revoke all access, delete the `liberra-standard-*` CloudFormation stack. Access is gone immediately. No support ticket, no waiting, nothing to clean up on our end.
+| | AWS | Azure | Google Cloud |
+|---|---|---|---|
+| **How** | Cross-account IAM role | Lighthouse delegation | Service account impersonation |
+| **What we get** | The role, and only with your External ID | Built-in Contributor, on one subscription | `roles/editor`, or `roles/viewer` for read-only |
+| **Secret stored** | None. STS tokens, 60 minutes, in memory | None | None |
+| **You revoke by** | Deleting the CloudFormation stack | Removing the delegation | Removing the IAM binding |
 
----
+Revocation is instant and needs nothing from us. No ticket, no waiting.
 
-## Free vs Pro
-
-| | Free | Pro |
-|---|---|---|
-| Read your AWS account | Yes | Yes |
-| View costs and usage | Yes | Yes |
-| Make changes to resources | No | Yes, with your approval |
-| Destructive operations | Never | Never |
-| IAM changes | Blocked | Blocked, except attach/detach of AWS-managed policies — approval required, admin-level policies always denied |
-
-Free tier is read-only. All write operations are blocked at the application layer before they reach AWS. Pro tier unlocks writes: every change starts with your approval — one yes covers the follow-through steps of that same request, and destructive or security-sensitive operations re-prompt every time.
+On AWS every session is also stamped with `SourceIdentity: liberra-<your-email>`, so every call Liberra makes shows up in **your** CloudTrail under a name you can trace.
 
 ---
 
-## The IAM policy
+## Who refuses a delete
 
-See [`iam-policy.json`](./iam-policy.json) for the exact policy every user gets.
+This is the part worth understanding, because the three clouds do not hand us the same rope.
 
-The policy uses `Allow *` with an explicit deny list. This lets Liberra work across any AWS service in your account without breaking when AWS adds new services. The deny list below is enforced by AWS itself, not by our code.
+- **AWS.** The role's own policy carries an explicit `Deny`. In IAM a deny beats every allow, including your administrator's. AWS refuses us, not our code.
+- **Google Cloud.** IAM Deny Policies can do the same thing. See "Not here yet" below.
+- **Azure.** Neither is possible. Lighthouse grants built-in roles only, Azure will not let a third party create a deny assignment, and Azure Policy has no caller condition, so a rule aimed at us would block your own deletes too. On Azure the refusal is **ours**, in code. That is a weaker guarantee, and we would rather say it than let you assume otherwise.
 
-| Category | Blocked actions |
-|---|---|
-| IAM identity | CreateUser, DeleteUser, CreateLoginProfile, CreateAccessKey, DeleteRole, DetachRolePolicy |
-| KMS | ScheduleKeyDeletion, DeleteAlias, DeleteImportedKeyMaterial |
-| Secrets | DeleteSecret |
-| Audit trails | StopLogging, DeleteTrail, StopConfigurationRecorder, DeleteConfigurationRecorder |
-| Security posture | DisableEbsEncryptionByDefault, DisassociateFromMasterAccount |
+---
+
+## What the code blocks, on every cloud
+
+Published in full: [`aws/aws_safety.py`](./aws/aws_safety.py), [`azure/azure_safety.py`](./azure/azure_safety.py), [`gcp/gcp_safety.py`](./gcp/gcp_safety.py).
+
+1. **Delete, terminate and purge are refused.** AWS matches the operation name, Azure matches the HTTP verb `DELETE`, Google Cloud matches both `DELETE` and its destructive colon-verbs. A keyword rule rather than a list, so it covers services that do not exist yet.
+2. **Account-level services are blocked outright.** On AWS: `organizations`, `sts`, `account`, `sso`, `sso-admin`, `identitystore`. One exception, `sts.get_caller_identity`, a harmless "which account am I?" read. Azure and Google Cloud carry the same block over their own account-level namespaces and their org or folder operations.
+3. **Secret values cannot be read.** `secretsmanager.get_secret_value` on AWS, Secret Manager `:access` on Google Cloud. Liberra can see that a secret exists, never what is in it.
+4. **Backdoor and audit-blinding operations are blocked.** Creating IAM users or access keys, planting scheduled rules or SSM activations, scheduling key deletion, stopping CloudTrail, disassociating GuardDuty, stopping the config recorder. These never reach the approval box.
+5. **Dangerous parameters are refused whatever the operation.** Opening SSH, RDP or database ports to `0.0.0.0/0`, public S3 bucket policies and ACLs, launching more than 20 instances at once, injecting UserData, attaching admin-level IAM policies.
+6. **Anything unrecognised is treated as a write** and waits for your approval. Nothing auto-executes by default.
+
+Everything not on that list is an ordinary write: Liberra proposes it, you approve it, then it runs.
+
+---
+
+## Check it yourself
+
+Do not trust this repo. Ask your own cloud.
+
+**AWS. Read the rule, then make AWS apply it.**
+
+```bash
+aws iam get-role-policy \
+  --role-name <your-liberra-role> \
+  --policy-name LiberraStandardPolicy
+
+aws iam simulate-principal-policy \
+  --policy-source-arn <your-liberra-role-arn> \
+  --action-names ec2:TerminateInstances s3:DeleteBucket
+```
+
+The second command is AWS itself answering `explicitDeny`. That is the only opinion here that is not ours.
+
+**AWS. Match your own role to this repo.** Every role we generate is tagged with the policy version it was built from.
+
+```bash
+aws iam list-role-tags --role-name <your-liberra-role>
+```
+
+Compare `PolicyVersion` against [`aws/iam-policy.json`](./aws/iam-policy.json). If they match, the file you just read is the rule you are actually living under.
+
+**Azure. See exactly what you delegated.**
+
+```bash
+az managedservices assignment list
+```
+
+**Google Cloud. See exactly what you granted.**
+
+```bash
+gcloud projects get-iam-policy <project-id>
+```
+
+---
+
+## Not here yet, on purpose
+
+Two things are built and verified but **deployed to nobody**, so they are not in this repo:
+
+- **A 332-action `DenyDestroy` for AWS**, derived from AWS's own service definitions. `iam:SimulateCustomPolicy` returns `explicitDeny` for every destructive action tested. Every live customer is still on the 16-action deny in [`aws/iam-policy.json`](./aws/iam-policy.json).
+- **A Google Cloud IAM Deny Policy** covering 60 permission groups across 20 services, offered as an optional second step at connect.
+
+This repo documents what customers actually have, not what is coming. When those ship, this repo changes with them.
 
 ---
 
 ## What Liberra can see
 
-The role uses `Allow *`, so Liberra **can** read broadly across your account — that's what makes "ask anything about your cloud" work. You should know exactly what that means:
+The AWS role uses `Allow *` with an explicit deny list, which is what makes "ask anything about your cloud" work. You should know exactly what that means:
 
-- It can read resource configurations, costs, logs, and metadata — anything the role permits.
-- It **cannot** read Secrets Manager values — `get_secret_value` is a blocked read in code. Liberra can see that a secret exists, never its value.
-- SSM Parameter Store values, including SecureString, **are** readable — you consent to this when you connect.
-- Your questions and cloud metadata are sent to Anthropic's Claude API to generate answers. Anthropic does not train on this data. Your AWS credentials are never sent to the AI.
-- Liberra stores: your Role ARN, an encrypted External ID, the Cloud Index, and chat history. Liberra never stores: access keys, session tokens, secret values.
-
----
-
-## What the code blocks on top of IAM
-
-Every request passes through an application safety layer before reaching AWS. See [`aws_safety.py`](./aws_safety.py) for the full logic and [`blocked-operations.md`](./blocked-operations.md) for the plain-English version.
-
-In the order the code checks them:
-
-1. **Six services blocked entirely** — `organizations`, `sts`, `account`, `sso`, `sso-admin`, `identitystore`. One deliberate exception: `sts.get_caller_identity`, a harmless "which account am I?" read. Everything else on these services is denied.
-2. **Every delete, terminate, and purge — blocked by keyword.** Any operation whose name contains `delete`, `terminate`, or `purge` is refused before it reaches AWS. A keyword check, not a list — it covers every AWS service, including ones that don't exist yet.
-3. **Targeted blocks** — operations that create long-lived credentials, plant persistence, or blind your audit trail (EventBridge rules, SSM activations, `kms.schedule_key_deletion`, `cloudtrail.stop_logging`, GuardDuty disassociation, IAM user/key creation). These never reach the approval box.
-4. **Secrets stay secret** — `secretsmanager.get_secret_value` is a blocked read. Liberra can see that a secret exists but can never retrieve its value.
-5. **Dangerous parameter patterns** — blocked regardless of operation: opening sensitive ports (SSH, RDP, databases) to `0.0.0.0/0`, public S3 bucket policies and ACLs, launching more than 20 instances in one call, injecting instance UserData, destructive shell commands via SSM, attaching admin-level IAM policies.
-6. **Unknown operations fail safe** — anything unrecognized is treated as a write and pauses for approval. Nothing auto-executes by default.
+- It can read resource configuration, cost, logs and metadata across your account.
+- It **cannot** read Secrets Manager values. It can see that a secret exists, never its contents.
+- SSM Parameter Store values, including SecureString, **are** readable. You consent to that when you connect.
+- Your questions and your cloud metadata go to Anthropic's Claude API. Your cloud credentials never do.
+- We store your role ARN, an encrypted External ID, your Cloud Index and your chat history. We never store access keys, session tokens or secret values.
 
 ---
 
-## Verify it yourself
+## Found a problem?
 
-The policy is in this repo: [`iam-policy.json`](./iam-policy.json)
-
-That file is the policy produced by the same generator that builds every user's CloudFormation
-template, taken from commit `9081d30` — the commit currently deployed.
-
-It is a **copy**, refreshed by hand, not a live mirror. It was two months stale once; naming the
-commit is what makes that visible instead of invisible. If you want certainty rather than our word,
-don't read this file at all — read the role in your own account:
-
-```bash
-aws iam get-role-policy --role-name <your-liberra-role> --policy-name LiberraStandardPolicy
-```
-
-That is the only copy that can actually affect your infrastructure.
-
-### What is deliberately NOT in this repo yet
-
-A much broader IAM deny — an additional `DenyDestroy` statement covering **332 delete/terminate/purge
-actions**, derived from AWS's own service definitions — is **built and verified but not shipped.**
-We have run `iam:SimulateCustomPolicy` against it and AWS returns `explicitDeny` for every
-destructive action tested.
-
-It is not in `iam-policy.json` because **no customer role carries it yet**, and this repo documents
-what is deployed, not what is coming. When it ships, this file and this section change together.
-
-Today, deletes are stopped by Liberra's application layer (`aws_safety.py`, published here in full)
-plus the 16-action IAM deny in [`iam-policy.json`](./iam-policy.json) — not by a blanket
-IAM-level delete ban.
-
----
-
-## Questions
-
-Open an issue in this repo.
+Mail **founder@liberraai.com**. Our [disclosure policy](https://liberraai.com/disclosure) carries a safe harbour for good faith research: we will not pursue anyone acting under it.
